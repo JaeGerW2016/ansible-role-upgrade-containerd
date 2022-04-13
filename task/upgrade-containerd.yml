@@ -1,0 +1,120 @@
+---
+- name: Create containerd directory
+  file: name={{ item }} state=directory
+  with_items:
+    - "{{ bin_dir }}"
+    - "{{ conf_dir }}"
+
+- name: Enable kenerl module overlay
+  modprobe: name=overlay state=present
+
+- name: Download and extract containerd
+  unarchive:
+    src:   https://github.com/containerd/containerd/releases/download/v{{ containerd.version }}/containerd-{{ containerd.version }}-linux-amd64.tar.gz
+    dest: "{{ bin_dir }}"
+    remote_src: yes
+
+- name: Stop kubelet service
+  systemd:
+    name: kubelet
+    state: stop
+    daemon_reload: yes
+    enabled: yes
+
+- name: Get running containerd processes
+  shell: "ps -ef | grep -v grep | grep -w {{ item }} | awk '{print $2}'"
+  with_items:
+    - "containerd"
+    - "containerd-shim"
+    - "containerd-shim-runc-v1"
+    - "containerd-shim-runc-v2"
+    - "ctr"
+  register: running_processes
+
+- name: Kill running containerd processes
+  shell: "kill {{ item }}"
+  with_items: "{{ running_processes.stdout_lines }}"
+
+- wait_for:
+    path: "/proc/{{ item }}/status"
+    state: absent
+  with_items: "{{ running_processes.stdout_lines }}"
+  ignore_errors: yes
+  register: killed_processes
+
+- name: Force kill stuck processes
+  shell: "kill -9 {{ item }}"
+  with_items: "{{ killed_processes.results | select('failed') | map(attribute='item') | list }}"
+
+
+- name: Replace containerd binary file
+  copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: a+x
+    remote_src: yes
+  with_items:
+  - { src: '/opt/containerd/bin/containerd', dest: '/usr/local/bin/containerd' }
+  - { src: '/opt/containerd/bin/containerd-shim', dest: '/usr/local/bin/containerd-shim' }
+  - { src: '/opt/containerd/bin/containerd-shim-runc-v1', dest: '/usr/local/bin/containerd-shim-runc-v1' }
+  - { src: '/opt/containerd/bin/containerd-shim-runc-v2', dest: '/usr/local/bin/containerd-shim-runc-v2' }
+  - { src: '/opt/containerd/bin/ctr', dest: '/usr/local/bin/ctr' }
+
+- name: Downlaod and crictl-{{ cri.version }}-linux-amd64.tar.gz
+  unarchive:
+    src: https://github.com/kubernetes-sigs/cri-tools/releases/download/{{ cri.version }}/crictl-{{ cri.version }}-linux-amd64.tar.gz
+    dest: /usr/local/bin/
+    remote_src: yes
+
+- name: Downlaod runc
+  get_url:
+    url: https://github.com/opencontainers/runc/releases/download/{{ runc.version }}/runc.amd64
+    force: yes
+    dest: /usr/local/bin/runc
+    remote_src: yes
+    mode: a+x
+
+- name: Copy containerd service
+  template:
+    src: "containerd.service.j2"
+    dest: "/etc/systemd/system/containerd.service"
+    mode: 644
+
+- name: Copy containerd config
+  template:
+    src: "containerd.conf.j2"
+    dest: "/etc/containerd/containerd.conf"
+    mode: 644
+
+- name: Copy crictl config
+  template: 
+    src: "crictl.yaml.j2"
+    dest: "/etc/crictl.yaml"
+    mode: 644
+
+- name:  Enable containerd service
+  shell: systemctl enable containerd
+  ignore_errors: true
+
+
+- name: restart containerd
+  systemd:
+    name: containerd
+    state: restarted
+    daemon_reload: yes
+    enabled: yes
+
+
+- name: Wait for containerd running
+  shell: "systemctl is-active containerd.service"
+  register: containerd_status
+  until: '"active" in containerd_status.stdout'
+  retries: 8
+  delay: 2
+
+- name: Add crictl CLI completion 
+  lineinfile:
+    dest: ~/.bashrc
+    state: present
+    regexp: 'crictl completion'
+    line: 'source <(crictl completion)'

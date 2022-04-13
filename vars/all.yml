@@ -1,0 +1,9 @@
+containerd:
+  version: 1.4.13
+runc:
+  version: v1.0.2
+cri:
+  version: v1.21.0
+
+bin_dir: /opt/containerd
+conf_dir: /etc/containerd
